@@ -1,0 +1,1197 @@
+import streamlit as st
+import re
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple
+
+
+# =========================================================
+# 기본 설정
+# =========================================================
+
+st.set_page_config(
+    page_title="서·논술형 자동 채점기",
+    page_icon="📝",
+    layout="wide"
+)
+
+st.title("📝 서·논술형 답안 자동 채점기")
+st.caption("1~3세트 · 의미 기반 채점 · 오개념 검사 · 결론 방향 검사")
+
+
+# =========================================================
+# 텍스트 전처리
+# =========================================================
+
+def normalize(text: str) -> str:
+    """기본적인 문자열 정규화"""
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[.,!?…]", "", text)
+    return text.strip()
+
+
+def contains_any(text: str, patterns: List[str]) -> bool:
+    """후보 표현 중 하나라도 포함하는지 검사"""
+    text = normalize(text)
+    return any(normalize(p) in text for p in patterns)
+
+
+def contains_all_groups(text: str, groups: List[List[str]]) -> bool:
+    """
+    각 그룹에서 최소 하나씩 발견되어야 True.
+    예:
+    [["혼자"], ["집중", "공부"]]
+    """
+    text = normalize(text)
+
+    for group in groups:
+        if not any(normalize(word) in text for word in group):
+            return False
+
+    return True
+
+
+# =========================================================
+# 의미 그룹
+# 단순 키워드가 아니라 동의 표현 묶음
+# =========================================================
+
+SEMANTIC = {
+
+    # -----------------------------
+    # 1세트
+    # -----------------------------
+
+    "easy_task": [
+        "비교적 쉬운",
+        "쉬운 과제",
+        "쉬운 공부",
+        "큰 노력이 필요 없는",
+        "큰 노력을 들일 필요가 없는",
+        "쉽게 할 수 있는"
+    ],
+
+    "hard_task": [
+        "지나치게 어려운",
+        "어려운 과제",
+        "복잡한 과제",
+        "도전이 필요한",
+        "어렵고 복잡한"
+    ],
+
+    "together_environment": [
+        "다른 사람들과 함께",
+        "함께 공부",
+        "모임을 만들어",
+        "공부 모임",
+        "사람들과 함께"
+    ],
+
+    "public_study_space": [
+        "커피숍",
+        "도서관"
+    ],
+
+    "alone_focus": [
+        "혼자 집중",
+        "혼자 차분하게",
+        "혼자 공부",
+        "혼자서 집중",
+        "혼자 조용히"
+    ],
+
+    "practice_until_familiar": [
+        "충분히 연습",
+        "익숙해질 때까지",
+        "연습하며 익숙해질"
+    ],
+
+    "social_facilitation": [
+        "사회적 촉진"
+    ],
+
+    "social_inhibition": [
+        "사회적 억제"
+    ],
+
+
+    # -----------------------------
+    # 2세트
+    # -----------------------------
+
+    "static_water": [
+        "높은 곳에 고여 있는 물",
+        "높은 곳에 고인 물",
+        "고여 있는 물",
+        "고인 물"
+    ],
+
+    "flowing_water": [
+        "흐르는 물"
+    ],
+
+    "charge_not_moving": [
+        "전하가 이동하지",
+        "전하가 움직이지",
+        "전하가 흐르지",
+        "전하가 머물러",
+        "전하가 정지"
+    ],
+
+    "charge_moving": [
+        "전하가 이동",
+        "전하가 움직",
+        "전하가 흐르"
+    ],
+
+    "not_dangerous": [
+        "위험하지 않",
+        "위험이 없",
+        "위험성이 없"
+    ],
+
+    "dangerous": [
+        "위험하다",
+        "감전의 위험",
+        "위험이 있다"
+    ],
+
+    "static_electricity_definition": [
+        "전하가 정지 상태",
+        "흐르지 않고 머물러 있는 전기",
+        "정지 상태로 있는 전기"
+    ],
+
+
+    # -----------------------------
+    # 3세트
+    # -----------------------------
+
+    "robot_skating": [
+        "로봇이 한 번의 실수 없이",
+        "로봇이 완벽하게 피겨 스케이팅",
+        "완벽하게 피겨 스케이팅하는 로봇",
+        "실수 없이 완벽하게"
+    ],
+
+    "human_emotion": [
+        "감정",
+        "고유한 감정"
+    ],
+
+    "human_philosophy": [
+        "철학",
+        "고유한 철학"
+    ],
+
+    "human_experience": [
+        "삶의 경험",
+        "살아온 경험",
+        "경험"
+    ],
+
+    "human_viewpoint": [
+        "세상을 바라보는 관점",
+        "관점"
+    ],
+
+    "human_environment": [
+        "환경",
+        "주변 환경"
+    ],
+
+    "ai_no_emotion": [
+        "감정을 느끼지 못",
+        "감정이 없",
+        "인간과 같은 감정은 없"
+    ],
+
+    "ai_no_philosophy": [
+        "독자적인 철학이 없",
+        "철학이 없"
+    ],
+
+    "ai_no_story": [
+        "독자적인 이야기가 없",
+        "이야기가 없"
+    ],
+
+    "hard_to_call_art": [
+        "예술로 보기 어렵",
+        "예술이라고 보기 어렵",
+        "예술로 보기는 어렵"
+    ],
+
+    "art_world_change": [
+        "미술계에 큰 변화",
+        "기존 미술계에 변화",
+        "미술계에 변화를"
+    ],
+
+    "expand_art": [
+        "예술의 범주를 확장",
+        "예술의 범주 확장"
+    ],
+
+    "symbolic_value": [
+        "상징적인 가치",
+        "상징적 가치"
+    ],
+
+    "no_value": [
+        "가치가 전혀 없",
+        "가치가 없다"
+    ],
+
+    "viewer_emotion": [
+        "감상자에게 감동",
+        "남다른 감동",
+        "마음을 울리",
+        "깊은 감동"
+    ]
+}
+
+
+# =========================================================
+# 설명 방법 판별
+# =========================================================
+
+EXPLANATION_METHODS = {
+
+    "정의": {
+        "markers": [
+            "란 ",
+            "이란 ",
+            "말한다",
+            "뜻한다"
+        ]
+    },
+
+    "예시": {
+        "markers": [
+            "예를 들어",
+            "예로는",
+            "예를 들면"
+        ]
+    },
+
+    "인과": {
+        "markers": [
+            "때문에",
+            "므로",
+            "그래서",
+            "따라서",
+            "때문이다"
+        ]
+    },
+
+    "비교와 대조": {
+        "markers": [
+            "반면",
+            "다르",
+            "같다면",
+            "같은 반면",
+            "보다",
+            "차이"
+        ]
+    },
+
+    "분석": {
+        "markers": [
+            "여러 요소",
+            "요소가",
+            "여러 가지",
+            "등이 담겨",
+            "로 이루어"
+        ]
+    },
+
+    "분류와 구분": {
+        "markers": [
+            "나뉜다",
+            "분류",
+            "종류",
+            "구분"
+        ]
+    }
+}
+
+
+def detect_methods(answer: str) -> List[str]:
+    """답안에 실제로 드러난 설명 방법 추정"""
+    found = []
+
+    for method, rule in EXPLANATION_METHODS.items():
+        if contains_any(answer, rule["markers"]):
+            found.append(method)
+
+    return found
+
+
+def extract_declared_method(answer: str) -> str:
+    """
+    문장 끝 괄호의 설명 방법 추출
+    예: ...(비교와 대조)
+    """
+    pattern = r"\((정의|예시|인과|분석|비교와 대조|분류와 구분)\)"
+    match = re.search(pattern, answer)
+
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+# =========================================================
+# 공통 채점 결과
+# =========================================================
+
+@dataclass
+class GradeResult:
+    score: int
+    max_score: int
+    status: str
+    passed: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+    detected_methods: List[str] = field(default_factory=list)
+
+
+# =========================================================
+# 1세트 1번
+# =========================================================
+
+def grade_set1_q1(ans_1, ans_2, ans_3):
+
+    result = GradeResult(0, 3, "채점 중")
+
+    # ㉠
+    if contains_any(ans_1, SEMANTIC["easy_task"]):
+        result.score += 1
+        result.passed.append("㉠ 쉬운 과제의 특성을 올바르게 표현함")
+    else:
+        result.errors.append(
+            "㉠은 비교적 쉽거나 큰 노력이 필요하지 않은 과제의 특성이 필요함"
+        )
+
+    # ㉡
+    if (
+        contains_any(ans_2, SEMANTIC["alone_focus"])
+        or contains_all_groups(
+            ans_2,
+            [
+                ["혼자", "혼자서"],
+                ["집중", "공부", "차분하게"]
+            ]
+        )
+    ):
+        result.score += 1
+        result.passed.append("㉡ 어려운 과제에서 혼자 집중하는 방법을 표현함")
+    else:
+        result.errors.append(
+            "㉡은 어려운 과제에서 혼자 차분하게 집중하는 방법이 필요함"
+        )
+
+    # ㉢
+    if contains_any(ans_3, SEMANTIC["social_inhibition"]):
+        result.score += 1
+        result.passed.append("㉢ 사회적 억제를 정확히 제시함")
+    else:
+        result.errors.append(
+            "㉢은 관련 심리 현상인 '사회적 억제'가 필요함"
+        )
+
+    # 개념 혼동 검사
+    if contains_any(ans_3, SEMANTIC["social_facilitation"]):
+        result.errors.append(
+            "오개념: 어려운 과제와 관련된 현상에 '사회적 촉진'을 사용함"
+        )
+
+    result.status = "통과" if result.score == 3 else "보완 필요"
+
+    return result
+
+
+# =========================================================
+# 설명문 공통 채점
+# =========================================================
+
+def grade_explanation_pair(
+    ans1,
+    ans2,
+    required_concepts_1,
+    required_concepts_2,
+    misconception_rules=None
+):
+
+    result = GradeResult(0, 5, "채점 중")
+
+    # -----------------------
+    # 1. 내용 검사
+    # -----------------------
+
+    if any(contains_any(ans1, group) for group in required_concepts_1):
+        result.score += 1
+        result.passed.append("(1)의 핵심 내용이 확인됨")
+    else:
+        result.errors.append("(1)에 요구된 핵심 내용이 충분히 드러나지 않음")
+
+    if any(contains_any(ans2, group) for group in required_concepts_2):
+        result.score += 1
+        result.passed.append("(2)의 핵심 내용이 확인됨")
+    else:
+        result.errors.append("(2)에 요구된 핵심 내용이 충분히 드러나지 않음")
+
+    # -----------------------
+    # 2. 설명 방법 명칭
+    # -----------------------
+
+    declared1 = extract_declared_method(ans1)
+    declared2 = extract_declared_method(ans2)
+
+    if declared1:
+        result.score += 1
+        result.passed.append(f"(1) 설명 방법 표기: {declared1}")
+    else:
+        result.errors.append("(1) 문장 끝에 설명 방법 명칭이 없음")
+
+    if declared2:
+        result.score += 1
+        result.passed.append(f"(2) 설명 방법 표기: {declared2}")
+    else:
+        result.errors.append("(2) 문장 끝에 설명 방법 명칭이 없음")
+
+    # -----------------------
+    # 3. 서로 다른 방법
+    # -----------------------
+
+    if declared1 and declared2 and declared1 != declared2:
+        result.score += 1
+        result.passed.append("서로 다른 설명 방법을 선택함")
+    else:
+        result.errors.append("두 문장의 설명 방법은 서로 달라야 함")
+
+    # -----------------------
+    # 4. 실제 설명 방법 구현 검사
+    # -----------------------
+
+    for idx, (answer, declared) in enumerate(
+        [(ans1, declared1), (ans2, declared2)],
+        start=1
+    ):
+
+        if declared:
+            detected = detect_methods(answer)
+            result.detected_methods.extend(detected)
+
+            if declared not in detected:
+                result.warnings.append(
+                    f"({idx}) '{declared}'라고 표기했지만 "
+                    f"해당 설명 방법의 특징이 문장에 명확히 드러나지 않을 수 있음"
+                )
+
+    # -----------------------
+    # 5. 오개념 검사
+    # -----------------------
+
+    if misconception_rules:
+
+        for rule in misconception_rules:
+
+            if rule["condition"](ans1, ans2):
+                result.errors.append(rule["message"])
+
+    # -----------------------
+    # 최종 상태
+    # -----------------------
+
+    if result.errors:
+        result.status = "보완 필요"
+    elif result.score >= 4:
+        result.status = "통과"
+    else:
+        result.status = "부분 인정"
+
+    return result
+
+
+# =========================================================
+# 1세트 2번
+# =========================================================
+
+def grade_set1_q2(ans1, ans2):
+
+    required_1 = [
+        SEMANTIC["easy_task"],
+        SEMANTIC["together_environment"],
+        SEMANTIC["public_study_space"]
+    ]
+
+    required_2 = [
+        SEMANTIC["hard_task"],
+        SEMANTIC["alone_focus"],
+        SEMANTIC["practice_until_familiar"]
+    ]
+
+    misconception_rules = [
+
+        {
+            "condition":
+                lambda a, b:
+                contains_any(a, SEMANTIC["easy_task"])
+                and contains_any(a, SEMANTIC["alone_focus"]),
+
+            "message":
+                "오개념 가능성: 쉬운 과제에 '혼자 집중' 전략을 직접 연결함"
+        },
+
+        {
+            "condition":
+                lambda a, b:
+                contains_any(b, SEMANTIC["hard_task"])
+                and contains_any(b, SEMANTIC["together_environment"]),
+
+            "message":
+                "오개념: 어려운 과제를 다른 사람들과 함께하는 전략으로 설명함"
+        }
+    ]
+
+    return grade_explanation_pair(
+        ans1,
+        ans2,
+        required_1,
+        required_2,
+        misconception_rules
+    )
+
+
+# =========================================================
+# 2세트 1번
+# =========================================================
+
+def grade_set2_q1(ans1, ans2, ans3):
+
+    result = GradeResult(0, 3, "채점 중")
+
+    if contains_any(ans1, SEMANTIC["static_water"]):
+        result.score += 1
+        result.passed.append("㉠ 고여 있는 물의 비유를 정확히 사용함")
+    else:
+        result.errors.append("㉠은 높은 곳에 고여 있는 물의 의미가 필요함")
+
+    if contains_any(ans2, SEMANTIC["charge_not_moving"]):
+        result.score += 1
+        result.passed.append("㉡ 전하가 이동하지 않는 특성을 표현함")
+    else:
+        result.errors.append("㉡은 전하가 이동하지 않고 머무르는 특성이 필요함")
+
+    if contains_any(ans3, SEMANTIC["not_dangerous"]):
+        result.score += 1
+        result.passed.append("㉢ 위험하지 않다는 결론을 정확히 제시함")
+    else:
+        result.errors.append("㉢은 '위험하지 않음'이라는 결론이 필요함")
+
+    # 오개념 방지
+    if contains_any(ans2, SEMANTIC["charge_moving"]):
+        result.errors.append(
+            "오개념: 정전기에 실생활 전기의 '전하 이동' 특성을 사용함"
+        )
+
+    if contains_any(ans3, SEMANTIC["dangerous"]):
+        result.errors.append(
+            "오개념: 정전기의 위험성을 실생활 전기의 특성과 혼동함"
+        )
+
+    result.status = "통과" if result.score == 3 and not result.errors else "보완 필요"
+
+    return result
+
+
+# =========================================================
+# 2세트 2번
+# =========================================================
+
+def grade_set2_q2(ans1, ans2):
+
+    required_1 = [
+        SEMANTIC["static_electricity_definition"],
+        SEMANTIC["charge_not_moving"]
+    ]
+
+    required_2 = [
+        SEMANTIC["static_water"],
+        SEMANTIC["charge_not_moving"],
+        SEMANTIC["not_dangerous"]
+    ]
+
+    misconception_rules = [
+
+        {
+            "condition":
+                lambda a, b:
+                contains_any(a + " " + b, SEMANTIC["static_electricity_definition"])
+                and contains_any(a + " " + b, SEMANTIC["dangerous"]),
+
+            "message":
+                "오개념: 정전기를 위험한 전기로 결론지음"
+        }
+    ]
+
+    return grade_explanation_pair(
+        ans1,
+        ans2,
+        required_1,
+        required_2,
+        misconception_rules
+    )
+
+
+# =========================================================
+# 3세트 1번
+# =========================================================
+
+def grade_set3_q1(ans1, ans2, ans3):
+
+    result = GradeResult(0, 3, "채점 중")
+
+    # ㉠
+    if contains_any(ans1, SEMANTIC["robot_skating"]):
+        result.score += 1
+        result.passed.append("㉠ 로봇의 완벽한 피겨 스케이팅 비유를 제시함")
+    else:
+        result.errors.append(
+            "㉠은 로봇이 실수 없이 완벽하게 피겨 스케이팅하는 비유가 필요함"
+        )
+
+    # ㉡
+    limitation = (
+        contains_any(ans2, SEMANTIC["ai_no_emotion"])
+        or contains_any(ans2, SEMANTIC["ai_no_philosophy"])
+        or contains_any(ans2, SEMANTIC["ai_no_story"])
+    )
+
+    conclusion = contains_any(ans2, SEMANTIC["hard_to_call_art"])
+
+    if limitation and conclusion:
+        result.score += 1
+        result.passed.append("㉡ AI 그림을 예술로 보기 어려운 근거와 결론을 모두 제시함")
+    elif limitation:
+        result.errors.append(
+            "㉡에 근거는 있으나 '예술로 보기 어렵다'는 결론이 명확하지 않음"
+        )
+    else:
+        result.errors.append(
+            "㉡에는 AI의 감정·철학·이야기 부족과 예술 판단의 근거가 필요함"
+        )
+
+    # ㉢
+    value_found = (
+        contains_any(ans3, SEMANTIC["art_world_change"])
+        or contains_any(ans3, SEMANTIC["expand_art"])
+        or contains_any(ans3, SEMANTIC["symbolic_value"])
+    )
+
+    if value_found:
+        result.score += 1
+        result.passed.append("㉢ AI 그림의 의미 또는 가치를 올바르게 제시함")
+    else:
+        result.errors.append(
+            "㉢은 미술계의 변화 또는 예술 범주 확장 등의 가치를 포함해야 함"
+        )
+
+    # 오개념
+    if contains_any(ans2, SEMANTIC["no_value"]):
+        result.errors.append(
+            "오개념: AI 그림의 예술적 가치가 전혀 없다고 단정함"
+        )
+
+    result.status = "통과" if result.score == 3 and not result.errors else "보완 필요"
+
+    return result
+
+
+# =========================================================
+# 영상 기획 공통 채점
+# =========================================================
+
+def grade_video_plan(
+    visual,
+    visual_effect,
+    audio,
+    audio_effect,
+    visual_concepts,
+    audio_concepts,
+    visual_effect_concepts,
+    audio_effect_concepts,
+    misconception_patterns=None
+):
+
+    result = GradeResult(0, 4, "채점 중")
+
+    # 시각 요소
+    if any(contains_any(visual, group) for group in visual_concepts):
+        result.score += 1
+        result.passed.append("시각 요소가 핵심 내용을 반영함")
+    else:
+        result.errors.append("시각 요소에 요구된 핵심 개념이 충분히 드러나지 않음")
+
+    # 시각 효과
+    if any(
+        contains_any(visual_effect, group)
+        for group in visual_effect_concepts
+    ):
+        result.score += 1
+        result.passed.append("시각 요소의 효과가 지문 내용과 연결됨")
+    else:
+        result.errors.append("시각 요소의 효과에 지문 근거가 부족함")
+
+    # 청각 요소
+    if any(contains_any(audio, group) for group in audio_concepts):
+        result.score += 1
+        result.passed.append("청각 요소가 핵심 분위기와 연결됨")
+    else:
+        result.errors.append("청각 요소가 요구된 특성을 충분히 반영하지 못함")
+
+    # 청각 효과
+    if any(
+        contains_any(audio_effect, group)
+        for group in audio_effect_concepts
+    ):
+        result.score += 1
+        result.passed.append("청각 요소의 효과가 지문 내용과 연결됨")
+    else:
+        result.errors.append("청각 요소의 효과에 지문 근거가 부족함")
+
+    # 오개념 검사
+    if misconception_patterns:
+        combined = " ".join(
+            [visual, visual_effect, audio, audio_effect]
+        )
+
+        for pattern, message in misconception_patterns:
+            if contains_any(combined, pattern):
+                result.errors.append(message)
+
+    result.status = "통과" if result.score == 4 and not result.errors else "보완 필요"
+
+    return result
+
+
+# =========================================================
+# 1세트 3번
+# =========================================================
+
+def grade_set1_q3(visual, visual_effect, audio, audio_effect):
+
+    return grade_video_plan(
+
+        visual,
+        visual_effect,
+        audio,
+        audio_effect,
+
+        visual_concepts=[
+            SEMANTIC["hard_task"],
+            SEMANTIC["alone_focus"]
+        ],
+
+        audio_concepts=[
+            ["조용", "잔잔", "방해하지 않는", "무음"]
+        ],
+
+        visual_effect_concepts=[
+            SEMANTIC["hard_task"],
+            SEMANTIC["alone_focus"]
+        ],
+
+        audio_effect_concepts=[
+            SEMANTIC["alone_focus"],
+            ["차분하게 집중", "집중하는 환경"]
+        ],
+
+        misconception_patterns=[
+            (
+                SEMANTIC["together_environment"],
+                "오개념: 어려운 과제 장면에 함께 공부하는 환경을 사용함"
+            )
+        ]
+    )
+
+
+# =========================================================
+# 2세트 3번
+# =========================================================
+
+def grade_set2_q3(visual, visual_effect, audio, audio_effect):
+
+    return grade_video_plan(
+
+        visual,
+        visual_effect,
+        audio,
+        audio_effect,
+
+        visual_concepts=[
+            SEMANTIC["static_water"],
+            ["고여", "흐르지 않", "머물러"]
+        ],
+
+        audio_concepts=[
+            ["조용", "잔잔", "무음", "정적"]
+        ],
+
+        visual_effect_concepts=[
+            SEMANTIC["charge_not_moving"],
+            ["정적인 특성", "머물러 있는"]
+        ],
+
+        audio_effect_concepts=[
+            SEMANTIC["charge_not_moving"],
+            ["정적인 특성", "움직이지 않는"]
+        ],
+
+        misconception_patterns=[
+            (
+                ["폭포", "거세게 흐르는", "콸콸"],
+                "오개념 가능성: 정전기의 '고여 있음'과 반대되는 흐르는 물의 특성을 사용함"
+            )
+        ]
+    )
+
+
+# =========================================================
+# 3세트 2번
+# =========================================================
+
+def grade_set3_q2(ans1, ans2):
+
+    required_1 = [
+        SEMANTIC["human_emotion"],
+        SEMANTIC["human_experience"],
+        SEMANTIC["human_philosophy"]
+    ]
+
+    required_2 = [
+        SEMANTIC["ai_no_emotion"],
+        SEMANTIC["art_world_change"],
+        SEMANTIC["expand_art"],
+        SEMANTIC["symbolic_value"]
+    ]
+
+    misconception_rules = [
+
+        {
+            "condition":
+                lambda a, b:
+                contains_any(a + " " + b, SEMANTIC["no_value"]),
+
+            "message":
+                "오개념: AI 그림의 가치가 전혀 없다고 결론지음"
+        }
+    ]
+
+    return grade_explanation_pair(
+        ans1,
+        ans2,
+        required_1,
+        required_2,
+        misconception_rules
+    )
+
+
+# =========================================================
+# 3세트 3번
+# =========================================================
+
+def grade_set3_q3(visual, visual_effect, audio, audio_effect):
+
+    return grade_video_plan(
+
+        visual,
+        visual_effect,
+        audio,
+        audio_effect,
+
+        visual_concepts=[
+            SEMANTIC["human_emotion"],
+            SEMANTIC["human_philosophy"],
+            SEMANTIC["human_experience"],
+            SEMANTIC["human_viewpoint"],
+            SEMANTIC["human_environment"]
+        ],
+
+        audio_concepts=[
+            ["따뜻한 음악", "감동적인 음악", "잔잔한 음악", "감정을 느낄 수 있는"]
+        ],
+
+        visual_effect_concepts=[
+            SEMANTIC["human_emotion"],
+            SEMANTIC["human_experience"],
+            SEMANTIC["viewer_emotion"]
+        ],
+
+        audio_effect_concepts=[
+            SEMANTIC["human_emotion"],
+            SEMANTIC["viewer_emotion"]
+        ],
+
+        misconception_patterns=[
+            (
+                ["기계음", "메트로놈", "차갑고 정형화"],
+                "오개념 가능성: 인간 예술의 장면에 감정 없는 기계적 분위기를 사용함"
+            )
+        ]
+    )
+
+
+# =========================================================
+# 결과 출력
+# =========================================================
+
+def show_result(result: GradeResult):
+
+    col1, col2 = st.columns([1, 3])
+
+    with col1:
+        st.metric(
+            "점수",
+            f"{result.score} / {result.max_score}"
+        )
+
+    with col2:
+        if result.status == "통과":
+            st.success(f"판정: {result.status}")
+        elif result.status == "부분 인정":
+            st.warning(f"판정: {result.status}")
+        else:
+            st.error(f"판정: {result.status}")
+
+    if result.passed:
+        st.subheader("✅ 충족한 조건")
+        for item in result.passed:
+            st.write("•", item)
+
+    if result.warnings:
+        st.subheader("⚠️ 확인이 필요한 부분")
+        for item in result.warnings:
+            st.write("•", item)
+
+    if result.errors:
+        st.subheader("❌ 보완이 필요한 부분")
+        for item in result.errors:
+            st.write("•", item)
+
+    if result.detected_methods:
+        st.subheader("🔎 감지된 설명 방법")
+        st.write(", ".join(sorted(set(result.detected_methods))))
+
+
+# =========================================================
+# 모범 답안 데이터
+# =========================================================
+
+MODEL_ANSWERS = {
+
+    "1세트 1번": [
+        "㉠ 비교적 쉬운 과제 또는 큰 노력이 필요하지 않은 과제",
+        "㉡ 충분히 연습하며 익숙해질 때까지 혼자 차분하게 집중함",
+        "㉢ 사회적 억제"
+    ],
+
+    "1세트 2번": [
+        "선택안 A",
+        "(1) 비교적 쉬운 과제는 커피숍이나 도서관에서 다른 사람들과 함께하는 것이 효율적이다. (예시)",
+        "(2) 반면 지나치게 어렵거나 도전이 필요한 과제는 혼자 집중하는 것이 좋다. (비교와 대조)",
+
+        "선택안 B",
+        "(1) 비교적 쉬운 과제는 다른 사람들과 함께할 때 혼자 할 때보다 효율적일 수 있다. (비교와 대조)",
+        "(2) 지나치게 어려운 과제는 충분히 연습하며 익숙해질 때까지 혼자 집중하는 것이 좋다. (인과)"
+    ],
+
+    "1세트 3번": [
+        "시각 요소: 조용한 공간에서 학생이 혼자 어려운 과제에 집중하는 모습을 보여 줌.",
+        "시각 효과: 어려운 과제는 혼자 차분하게 집중하는 것이 효율적이라는 내용을 전달함.",
+        "청각 요소: 조용하거나 집중을 방해하지 않는 잔잔한 소리를 사용함.",
+        "청각 효과: 차분하게 혼자 집중하는 환경을 청각적으로 전달함."
+    ],
+
+    "2세트 1번": [
+        "㉠ 높은 곳에 고여 있는 물",
+        "㉡ 전하가 이동하지 않고 머물러 있음",
+        "㉢ 위험하지 않음"
+    ],
+
+    "2세트 2번": [
+        "선택안 A",
+        "(1) 정전기란 전하가 정지 상태로 있어 그 분포가 시간적으로 변화하지 않는 전기와 그로 인한 전기 현상을 말한다. (정의)",
+        "(2) 실생활에서 사용하는 전기가 흐르는 물과 같다면 정전기는 높은 곳에 고여 있는 물과 같으며 전하가 이동하지 않고 머물러 있어 위험하지 않다. (비교와 대조)",
+
+        "선택안 B",
+        "(1) 정전기란 흐르지 않고 머물러 있는 전기와 그로 인한 전기 현상을 말한다. (정의)",
+        "(2) 정전기는 전하가 이동하지 않고 머물러 있기 때문에 실생활에서 사용하는 전기와 달리 위험하지 않다. (인과)"
+    ],
+
+    "2세트 3번": [
+        "시각 요소: 높은 곳에 물이 고여 있지만 아래로 흐르지 않고 그대로 머물러 있는 모습을 보여 줌.",
+        "시각 효과: 정전기의 전하가 이동하지 않고 머물러 있는 특성을 시각적으로 전달함.",
+        "청각 요소: 조용하고 잔잔한 분위기의 소리를 사용함.",
+        "청각 효과: 전하가 이동하지 않고 머물러 있는 정적인 특성을 전달함."
+    ],
+
+    "3세트 1번": [
+        "㉠ 로봇이 한 번의 실수 없이 완벽하게 피겨 스케이팅을 하는 경기",
+        "㉡ 인공 지능은 감정을 느끼지 못하고 독자적인 철학이나 이야기가 없기 때문에 예술로 보기 어렵다.",
+        "㉢ 기존 미술계에 큰 변화를 가져오고 예술의 범주를 확장할 수 있다는 상징적인 가치가 있다."
+    ],
+
+    "3세트 2번": [
+        "선택안 A",
+        "(1) 인간이 만든 예술 작품에는 작가의 고유한 감정과 철학, 삶의 경험과 세상을 바라보는 관점, 주변 환경 등 여러 요소가 담겨 있다. (분석)",
+        "(2) 반면 인공 지능이 그린 그림은 인간과 같은 감정이나 독자적인 철학과 이야기는 없지만, 기존 미술계에 큰 변화를 가져오고 예술의 범주를 확장할 수 있다는 점에서 상징적인 가치를 지닌다. (비교와 대조)",
+
+        "선택안 B",
+        "(1) 인공 지능은 인간과 같은 감정을 느끼지 못하고 독자적인 철학이나 이야기가 없기 때문에 그 그림을 예술로 보기는 어렵다. (인과)",
+        "(2) 그러나 인공 지능이 그린 그림은 기존 미술계에 큰 변화를 가져왔으며 앞으로 예술의 범주를 확장할 수 있다는 점에서 상징적인 가치를 지닌다. (분석)"
+    ],
+
+    "3세트 3번": [
+        "시각 요소: 화가가 자신의 삶의 경험과 감정을 작품에 담아 그림을 완성하는 모습을 보여 줌.",
+        "시각 효과: 인간 예술에는 작가의 감정과 삶의 경험 등이 담긴다는 내용을 전달함.",
+        "청각 요소: 사람의 감정과 작품의 분위기를 느낄 수 있는 따뜻하고 감동적인 음악을 사용함.",
+        "청각 효과: 인간 예술에 담긴 감정과 감상자에게 주는 남다른 감동을 강조함."
+    ]
+}
+
+
+# =========================================================
+# UI
+# =========================================================
+
+question = st.sidebar.selectbox(
+    "문항 선택",
+    list(MODEL_ANSWERS.keys())
+)
+
+
+st.sidebar.divider()
+
+if st.sidebar.checkbox("모범 답안 보기"):
+    st.sidebar.subheader("📚 인정 가능한 모범 답안")
+
+    for answer in MODEL_ANSWERS[question]:
+        st.sidebar.write(answer)
+
+
+# =========================================================
+# 문항별 입력 화면
+# =========================================================
+
+if question == "1세트 1번":
+
+    a1 = st.text_input("㉠ 답안")
+    a2 = st.text_input("㉡ 답안")
+    a3 = st.text_input("㉢ 답안")
+
+    if st.button("채점하기"):
+        show_result(grade_set1_q1(a1, a2, a3))
+
+
+elif question == "1세트 2번":
+
+    a1 = st.text_area("(1) 답안", height=120)
+    a2 = st.text_area("(2) 답안", height=120)
+
+    if st.button("채점하기"):
+        show_result(grade_set1_q2(a1, a2))
+
+
+elif question == "1세트 3번":
+
+    visual = st.text_area("시각 요소(Ⓐ)")
+    visual_effect = st.text_area("시각 요소의 효과")
+    audio = st.text_area("청각 요소(Ⓑ)")
+    audio_effect = st.text_area("청각 요소의 효과")
+
+    if st.button("채점하기"):
+        show_result(
+            grade_set1_q3(
+                visual,
+                visual_effect,
+                audio,
+                audio_effect
+            )
+        )
+
+
+elif question == "2세트 1번":
+
+    a1 = st.text_input("㉠ 답안")
+    a2 = st.text_input("㉡ 답안")
+    a3 = st.text_input("㉢ 답안")
+
+    if st.button("채점하기"):
+        show_result(grade_set2_q1(a1, a2, a3))
+
+
+elif question == "2세트 2번":
+
+    a1 = st.text_area("(1) 답안")
+    a2 = st.text_area("(2) 답안")
+
+    if st.button("채점하기"):
+        show_result(grade_set2_q2(a1, a2))
+
+
+elif question == "2세트 3번":
+
+    visual = st.text_area("시각 요소(Ⓐ)")
+    visual_effect = st.text_area("시각 요소의 효과")
+    audio = st.text_area("청각 요소(Ⓑ)")
+    audio_effect = st.text_area("청각 요소의 효과")
+
+    if st.button("채점하기"):
+        show_result(
+            grade_set2_q3(
+                visual,
+                visual_effect,
+                audio,
+                audio_effect
+            )
+        )
+
+
+elif question == "3세트 1번":
+
+    a1 = st.text_input("㉠ 답안")
+    a2 = st.text_input("㉡ 답안")
+    a3 = st.text_input("㉢ 답안")
+
+    if st.button("채점하기"):
+        show_result(grade_set3_q1(a1, a2, a3))
+
+
+elif question == "3세트 2번":
+
+    a1 = st.text_area("(1) 답안")
+    a2 = st.text_area("(2) 답안")
+
+    if st.button("채점하기"):
+        show_result(grade_set3_q2(a1, a2))
+
+
+elif question == "3세트 3번":
+
+    visual = st.text_area("시각 요소(Ⓐ)")
+    visual_effect = st.text_area("시각 요소의 효과")
+    audio = st.text_area("청각 요소(Ⓑ)")
+    audio_effect = st.text_area("청각 요소의 효과")
+
+    if st.button("채점하기"):
+        show_result(
+            grade_set3_q3(
+                visual,
+                visual_effect,
+                audio,
+                audio_effect
+            )
+        )
